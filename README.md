@@ -55,20 +55,9 @@ For personal use only. If you need real security:
 - Store data in a database with proper access controls
 - Use HTTPS everywhere
 
-## License
-MIT
-
 ## Contributing
 Pull requests welcome!
 ```
-
----
-
-## **7. Add a LICENSE File**
-
-Create `LICENSE` file (MIT is common for open source):
-```
-MIT License
 
 Copyright (c) 2025 Sasanka Senanayake
 

@@ -104,7 +104,12 @@ export default function BudgetTracker() {
     const unsubscribe = onSnapshot(docRef, (docSnap) => {
       if (docSnap.exists()) {
         console.log('Data loaded from Firestore');
-        setMonthlyData(docSnap.data().monthlyData || {});
+        const loadedData = docSnap.data().monthlyData || {};
+        // Ensure at least the current month exists
+        if (!loadedData[currentMonth]) {
+          loadedData[currentMonth] = { income: [], expenses: [] };
+        }
+        setMonthlyData(loadedData);
       } else {
         console.log('No existing data found, initializing empty budget');
         // Initialize with empty data for new user
@@ -115,7 +120,6 @@ export default function BudgetTracker() {
           }
         };
         setMonthlyData(emptyData);
-        saveToFirestore(emptyData);
       }
     }, (error) => {
       console.error('Error loading data from Firestore:', error);
@@ -297,13 +301,33 @@ export default function BudgetTracker() {
   const expenses = currentData.expenses || [];
 
   const addIncome = () => {
-    const newIncome = [...income, { id: Date.now(), name: '', amount: 0 }];
-    updateMonthData(currentMonth, 'income', newIncome);
+    // Ensure current month data exists before adding
+    const currentData = monthlyData[currentMonth] || { income: [], expenses: [] };
+    const newIncome = [...(currentData.income || []), { id: Date.now(), name: '', amount: 0 }];
+
+    setMonthlyData(prev => ({
+      ...prev,
+      [currentMonth]: {
+        ...prev[currentMonth],
+        income: newIncome,
+        expenses: currentData.expenses || []
+      }
+    }));
   };
 
   const addExpense = () => {
-    const newExpenses = [...expenses, { id: Date.now(), name: '', amount: 0 }];
-    updateMonthData(currentMonth, 'expenses', newExpenses);
+    // Ensure current month data exists before adding
+    const currentData = monthlyData[currentMonth] || { income: [], expenses: [] };
+    const newExpenses = [...(currentData.expenses || []), { id: Date.now(), name: '', amount: 0 }];
+
+    setMonthlyData(prev => ({
+      ...prev,
+      [currentMonth]: {
+        ...prev[currentMonth],
+        income: currentData.income || [],
+        expenses: newExpenses
+      }
+    }));
   };
 
   const updateIncome = (id, field, value) => {

@@ -1,5 +1,8 @@
-import React, { useState } from 'react';
+import React, { useState, useEffect } from 'react';
 import { PieChart, Pie, Cell, LineChart, Line, BarChart, Bar, XAxis, YAxis, CartesianGrid, Tooltip, Legend, ResponsiveContainer } from 'recharts';
+import { auth, db } from './firebase';
+import { signInWithEmailAndPassword, signOut, onAuthStateChanged, createUserWithEmailAndPassword } from 'firebase/auth';
+import { doc, getDoc, setDoc, onSnapshot } from 'firebase/firestore';
 
 // Inline SVG Icons
 const Plus = ({ size = 24 }) => (
@@ -67,62 +70,178 @@ const BarChart3 = ({ size = 24, className = "" }) => (
 export default function BudgetTracker() {
   const months = ['January', 'February', 'March', 'April', 'May', 'June', 'July', 'August', 'September', 'October', 'November', 'December'];
 
-  // Authentication - Check localStorage on component mount
-  const [isAuthenticated] = useState(() => {
-    return localStorage.getItem('budgetTrackerAuth') === 'true';
-  });
-
+  // Authentication state
+  const [user, setUser] = useState(null);
+  const [loading, setLoading] = useState(true);
+  const [email, setEmail] = useState('');
   const [password, setPassword] = useState('');
   const [error, setError] = useState('');
+  const [isSignUp, setIsSignUp] = useState(false);
+  const [saveStatus, setSaveStatus] = useState('');
 
-  // Handle login with page reload
-  const handleLogin = (e) => {
-    e.preventDefault();
-    const correctPassword = import.meta.env.VITE_APP_PASSWORD || 'changeme';
+  // Budget data state
+  const [currentMonth, setCurrentMonth] = useState('August');
+  const [monthlyData, setMonthlyData] = useState({});
 
-    if (password === correctPassword) {
-      localStorage.setItem('budgetTrackerAuth', 'true');
-      // Reload page to show authenticated state
-      window.location.reload();
-    } else {
-      setError('Incorrect password. Please try again.');
-      setPassword('');
+  // Listen for auth state changes
+  useEffect(() => {
+    const unsubscribe = onAuthStateChanged(auth, (currentUser) => {
+      console.log('Auth state changed:', currentUser ? currentUser.email : 'No user');
+      setUser(currentUser);
+      setLoading(false);
+    });
+    return unsubscribe;
+  }, []);
+
+  // Load user's budget data from Firestore with real-time sync
+  useEffect(() => {
+    if (!user) return;
+
+    console.log('Setting up Firestore listener for user:', user.uid);
+    const docRef = doc(db, 'budgets', user.uid);
+
+    // Real-time listener - data syncs automatically across devices!
+    const unsubscribe = onSnapshot(docRef, (docSnap) => {
+      if (docSnap.exists()) {
+        console.log('Data loaded from Firestore');
+        setMonthlyData(docSnap.data().monthlyData || {});
+      } else {
+        console.log('No existing data found, initializing empty budget');
+        // Initialize with empty data for new user
+        const emptyData = {
+          'August': {
+            income: [],
+            expenses: []
+          }
+        };
+        setMonthlyData(emptyData);
+        saveToFirestore(emptyData);
+      }
+    }, (error) => {
+      console.error('Error loading data from Firestore:', error);
+      setError('Failed to load data. Please try refreshing.');
+    });
+
+    return unsubscribe;
+  }, [user]);
+
+  // Save to Firestore
+  const saveToFirestore = async (data) => {
+    if (!user) return;
+
+    try {
+      await setDoc(doc(db, 'budgets', user.uid), {
+        monthlyData: data,
+        lastUpdated: new Date().toISOString()
+      });
+      console.log('Data saved to Firestore successfully');
+      setSaveStatus('Saved ✓');
+      setTimeout(() => setSaveStatus(''), 2000);
+    } catch (error) {
+      console.error('Error saving to Firestore:', error);
+      setSaveStatus('Error saving!');
+      setTimeout(() => setSaveStatus(''), 3000);
     }
   };
 
-  // Handle logout with page reload
-  const handleLogout = () => {
-    localStorage.removeItem('budgetTrackerAuth');
-    // Reload page to show login screen
-    window.location.reload();
+  // Auto-save when data changes (with debouncing)
+  useEffect(() => {
+    if (user && monthlyData && Object.keys(monthlyData).length > 0) {
+      const timeoutId = setTimeout(() => {
+        saveToFirestore(monthlyData);
+      }, 1000); // Save 1 second after last change
+
+      return () => clearTimeout(timeoutId);
+    }
+  }, [monthlyData, user]);
+
+  // Handle login/signup
+  const handleLogin = async (e) => {
+    e.preventDefault();
+    setError('');
+
+    try {
+      if (isSignUp) {
+        await createUserWithEmailAndPassword(auth, email, password);
+      } else {
+        await signInWithEmailAndPassword(auth, email, password);
+      }
+    } catch (error) {
+      console.error('Auth error:', error);
+      if (error.code === 'auth/user-not-found') {
+        setError('No account found with this email. Try signing up!');
+      } else if (error.code === 'auth/wrong-password') {
+        setError('Incorrect password. Please try again.');
+      } else if (error.code === 'auth/email-already-in-use') {
+        setError('Email already in use. Try signing in instead.');
+      } else if (error.code === 'auth/weak-password') {
+        setError('Password should be at least 6 characters.');
+      } else if (error.code === 'auth/invalid-email') {
+        setError('Invalid email address.');
+      } else {
+        setError(error.message);
+      }
+    }
   };
 
+  // Handle logout
+  const handleLogout = async () => {
+    try {
+      await signOut(auth);
+      setMonthlyData({});
+    } catch (error) {
+      console.error('Error signing out:', error);
+    }
+  };
+
+  // Show loading screen
+  if (loading) {
+    return (
+      <div className="min-h-screen bg-gradient-to-br from-slate-900 via-slate-800 to-slate-900 flex items-center justify-center">
+        <div className="text-white text-xl">Loading...</div>
+      </div>
+    );
+  }
+
   // Show login screen if not authenticated
-  if (!isAuthenticated) {
+  if (!user) {
     return (
       <div className="min-h-screen bg-gradient-to-br from-slate-900 via-slate-800 to-slate-900 flex items-center justify-center p-6">
         <div className="bg-slate-800 rounded-xl shadow-2xl p-8 border border-slate-700 max-w-md w-full">
           <div className="text-center mb-6">
             <DollarSign size={48} className="text-blue-400 mx-auto mb-4" />
             <h1 className="text-3xl font-bold text-white mb-2">Monthly Budget Tracker</h1>
-            <p className="text-slate-400">Enter password to access your finances</p>
+            <p className="text-slate-400">{isSignUp ? 'Create your account' : 'Sign in to access your finances'}</p>
           </div>
 
           <form onSubmit={handleLogin} className="space-y-4">
+            <div>
+              <label className="block text-slate-300 mb-2 font-medium">Email</label>
+              <input
+                type="email"
+                value={email}
+                onChange={(e) => setEmail(e.target.value)}
+                placeholder="your@email.com"
+                className="w-full bg-slate-700 text-white px-4 py-3 rounded-lg border border-slate-600 focus:border-blue-500 focus:outline-none"
+                required
+                autoFocus
+              />
+            </div>
+
             <div>
               <label className="block text-slate-300 mb-2 font-medium">Password</label>
               <input
                 type="password"
                 value={password}
                 onChange={(e) => setPassword(e.target.value)}
-                placeholder="Enter your password"
+                placeholder={isSignUp ? "At least 6 characters" : "Enter your password"}
                 className="w-full bg-slate-700 text-white px-4 py-3 rounded-lg border border-slate-600 focus:border-blue-500 focus:outline-none"
-                autoFocus
+                required
               />
             </div>
 
             {error && (
-              <div className="bg-red-900/50 border border-red-500 text-red-200 px-4 py-3 rounded-lg">
+              <div className="bg-red-900/50 border border-red-500 text-red-200 px-4 py-3 rounded-lg text-sm">
                 {error}
               </div>
             )}
@@ -131,56 +250,31 @@ export default function BudgetTracker() {
               type="submit"
               className="w-full bg-blue-600 hover:bg-blue-700 text-white font-medium px-4 py-3 rounded-lg transition"
             >
-              Login
+              {isSignUp ? 'Sign Up' : 'Sign In'}
             </button>
           </form>
 
-          <div className="mt-6 text-center text-slate-500 text-sm">
-            <p>Default password: mybudget2024</p>
+          <div className="mt-4 text-center">
+            <button
+              onClick={() => {
+                setIsSignUp(!isSignUp);
+                setError('');
+              }}
+              className="text-blue-400 hover:text-blue-300 text-sm"
+            >
+              {isSignUp ? 'Already have an account? Sign in' : "Don't have an account? Sign up"}
+            </button>
+          </div>
+
+          <div className="mt-6 text-center text-slate-500 text-xs">
+            <p>Your data syncs automatically across all devices</p>
           </div>
         </div>
       </div>
     );
   }
 
-  // Load saved data from localStorage
-  const loadData = () => {
-    try {
-      const saved = localStorage.getItem('budgetTrackerData');
-      if (saved) {
-        return JSON.parse(saved);
-      }
-    } catch (e) {
-      console.error('Error loading data:', e);
-    }
-    return {
-      'August': {
-        income: [
-          { id: 1, name: 'Lloyds', amount: 5000 },
-          { id: 2, name: 'Other', amount: 2000 },
-          { id: 3, name: 'August Salary', amount: 10000 }
-        ],
-        expenses: [
-          { id: 1, name: 'Credit card', amount: 1500 },
-          { id: 2, name: 'Rent', amount: 2850 },
-          { id: 7, name: 'Phones & mac', amount: 250 },
-        ]
-      }
-    };
-  };
-
-  const [currentMonth, setCurrentMonth] = useState('August');
-  const [monthlyData, setMonthlyData] = useState(loadData);
-
-  // Save data to localStorage whenever it changes
-  React.useEffect(() => {
-    try {
-      localStorage.setItem('budgetTrackerData', JSON.stringify(monthlyData));
-    } catch (e) {
-      console.error('Error saving data:', e);
-    }
-  }, [monthlyData]);
-
+  // Budget tracker functions
   const getMonthData = (month) => {
     if (!monthlyData[month]) {
       return { income: [], expenses: [] };
@@ -317,10 +411,17 @@ export default function BudgetTracker() {
       <div className="max-w-7xl mx-auto">
         <div className="mb-6">
           <div className="flex justify-between items-center">
-            <div className="flex-1"></div>
+            <div className="flex-1">
+              <div className="flex items-center gap-2">
+                <span className="text-sm text-slate-400">{user.email}</span>
+                {saveStatus && (
+                  <span className="text-sm text-emerald-400">{saveStatus}</span>
+                )}
+              </div>
+            </div>
             <div className="flex-1 text-center">
               <h1 className="text-3xl md:text-4xl font-bold text-white mb-2">Monthly Budget Tracker</h1>
-              <p className="text-slate-400">Plan, track, and manage your finances with insights</p>
+              <p className="text-slate-400">Synced across all your devices ☁️</p>
             </div>
             <div className="flex-1 flex justify-end">
               <button
@@ -419,7 +520,7 @@ export default function BudgetTracker() {
             <div className="mt-6 pt-4 border-t border-slate-700">
               <div className="flex justify-between items-center text-xl font-bold">
                 <span className="text-slate-300">Total Income</span>
-                <span className="text-emerald-400">${totalIncome.toFixed(2)}</span>
+                <span className="text-emerald-400">£{totalIncome.toFixed(2)}</span>
               </div>
             </div>
           </div>
@@ -472,7 +573,7 @@ export default function BudgetTracker() {
             <div className="mt-6 pt-4 border-t border-slate-700">
               <div className="flex justify-between items-center text-xl font-bold">
                 <span className="text-slate-300">Total Expenses</span>
-                <span className="text-rose-400">${totalExpenses.toFixed(2)}</span>
+                <span className="text-rose-400">£{totalExpenses.toFixed(2)}</span>
               </div>
             </div>
           </div>
@@ -491,10 +592,10 @@ export default function BudgetTracker() {
                 <TrendingUp size={20} className="text-emerald-400" />
                 <p className="text-slate-400">Total Income</p>
               </div>
-              <p className="text-3xl font-bold text-emerald-400">${totalIncome.toFixed(2)}</p>
+              <p className="text-3xl font-bold text-emerald-400">£{totalIncome.toFixed(2)}</p>
               {avgMonthlyIncome > 0 && (
                 <p className="text-sm text-slate-500 mt-2">
-                  Avg: ${avgMonthlyIncome.toFixed(2)}
+                  Avg: £{avgMonthlyIncome.toFixed(2)}
                 </p>
               )}
             </div>
@@ -504,10 +605,10 @@ export default function BudgetTracker() {
                 <TrendingDown size={20} className="text-rose-400" />
                 <p className="text-slate-400">Total Expenses</p>
               </div>
-              <p className="text-3xl font-bold text-rose-400">${totalExpenses.toFixed(2)}</p>
+              <p className="text-3xl font-bold text-rose-400">£{totalExpenses.toFixed(2)}</p>
               {avgMonthlyExpenses > 0 && (
                 <p className="text-sm text-slate-500 mt-2">
-                  Avg: ${avgMonthlyExpenses.toFixed(2)}
+                  Avg: £{avgMonthlyExpenses.toFixed(2)}
                 </p>
               )}
             </div>
@@ -518,7 +619,7 @@ export default function BudgetTracker() {
                 <p className="text-slate-400">Balance</p>
               </div>
               <p className={`text-3xl font-bold ${balance >= 0 ? 'text-emerald-400' : 'text-red-400'}`}>
-                ${balance.toFixed(2)}
+                £{balance.toFixed(2)}
               </p>
               {totalIncome > 0 && (
                 <p className="text-sm text-slate-500 mt-2">
@@ -554,7 +655,7 @@ export default function BudgetTracker() {
                       <Cell key={`cell-${index}`} fill={COLORS[index % COLORS.length]} />
                     ))}
                   </Pie>
-                  <Tooltip formatter={(value) => `$${value.toFixed(2)}`} />
+                  <Tooltip formatter={(value) => `£${value.toFixed(2)}`} />
                 </PieChart>
               </ResponsiveContainer>
             </div>
@@ -573,7 +674,7 @@ export default function BudgetTracker() {
                   <XAxis dataKey="name" stroke="#94a3b8" />
                   <YAxis stroke="#94a3b8" />
                   <Tooltip
-                    formatter={(value) => `$${value.toFixed(2)}`}
+                    formatter={(value) => `£${value.toFixed(2)}`}
                     contentStyle={{ backgroundColor: '#1e293b', border: '1px solid #334155' }}
                   />
                   <Bar dataKey="amount" fill="#f43f5e" />
@@ -596,7 +697,7 @@ export default function BudgetTracker() {
                 <XAxis dataKey="month" stroke="#94a3b8" />
                 <YAxis stroke="#94a3b8" />
                 <Tooltip
-                  formatter={(value) => `$${value.toFixed(2)}`}
+                  formatter={(value) => `£${value.toFixed(2)}`}
                   contentStyle={{ backgroundColor: '#1e293b', border: '1px solid #334155' }}
                 />
                 <Legend />
@@ -630,7 +731,7 @@ export default function BudgetTracker() {
                       <td className="py-3 text-emerald-400 text-right">${stat.income.toFixed(2)}</td>
                       <td className="py-3 text-rose-400 text-right">${stat.expenses.toFixed(2)}</td>
                       <td className={`py-3 text-right font-bold ${stat.balance >= 0 ? 'text-emerald-400' : 'text-red-400'}`}>
-                        ${stat.balance.toFixed(2)}
+                        £{stat.balance.toFixed(2)}
                       </td>
                       <td className="py-3 text-slate-300 text-right">
                         {stat.income > 0 ? ((stat.balance / stat.income) * 100).toFixed(1) : '0.0'}%

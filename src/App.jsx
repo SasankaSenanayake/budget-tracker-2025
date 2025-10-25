@@ -1,8 +1,8 @@
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, useRef } from 'react';
 import { PieChart, Pie, Cell, LineChart, Line, BarChart, Bar, XAxis, YAxis, CartesianGrid, Tooltip, Legend, ResponsiveContainer } from 'recharts';
 import { auth, db } from './firebase';
 import { signInWithEmailAndPassword, signOut, onAuthStateChanged, createUserWithEmailAndPassword } from 'firebase/auth';
-import { doc, getDoc, setDoc, onSnapshot } from 'firebase/firestore';
+import { doc, setDoc, onSnapshot } from 'firebase/firestore';
 
 // Inline SVG Icons
 const Plus = ({ size = 24 }) => (
@@ -67,6 +67,21 @@ const BarChart3 = ({ size = 24, className = "" }) => (
   </svg>
 );
 
+const Target = ({ size = 24, className = "" }) => (
+  <svg width={size} height={size} className={className} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+    <circle cx="12" cy="12" r="10"></circle>
+    <circle cx="12" cy="12" r="6"></circle>
+    <circle cx="12" cy="12" r="2"></circle>
+  </svg>
+);
+
+const CheckCircle = ({ size = 24, className = "" }) => (
+  <svg width={size} height={size} className={className} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+    <path d="M22 11.08V12a10 10 0 1 1-5.93-9.14"></path>
+    <polyline points="22 4 12 14.01 9 11.01"></polyline>
+  </svg>
+);
+
 export default function BudgetTracker() {
   const months = ['January', 'February', 'March', 'April', 'May', 'June', 'July', 'August', 'September', 'October', 'November', 'December'];
 
@@ -81,7 +96,12 @@ export default function BudgetTracker() {
 
   // Budget data state
   const [currentMonth, setCurrentMonth] = useState('August');
+  const [currentView, setCurrentView] = useState('actual');
   const [monthlyData, setMonthlyData] = useState({});
+
+  // Track manual changes and prevent save loop
+  const [hasUnsavedChanges, setHasUnsavedChanges] = useState(false);
+  const isFromFirestore = useRef(false);
 
   // Listen for auth state changes
   useEffect(() => {
@@ -100,23 +120,28 @@ export default function BudgetTracker() {
     console.log('Setting up Firestore listener for user:', user.uid);
     const docRef = doc(db, 'budgets', user.uid);
 
-    // Real-time listener - data syncs automatically across devices!
     const unsubscribe = onSnapshot(docRef, (docSnap) => {
+      isFromFirestore.current = true; // Mark update as coming from Firestore
+
       if (docSnap.exists()) {
         console.log('Data loaded from Firestore');
         const loadedData = docSnap.data().monthlyData || {};
-        // Ensure at least the current month exists
-        if (!loadedData[currentMonth]) {
-          loadedData[currentMonth] = { income: [], expenses: [] };
-        }
+        // Ensure data structure has expected and actual
+        Object.keys(loadedData).forEach(month => {
+          if (!loadedData[month].expected) {
+            loadedData[month] = {
+              expected: { income: [], expenses: [] },
+              actual: loadedData[month]
+            };
+          }
+        });
         setMonthlyData(loadedData);
       } else {
         console.log('No existing data found, initializing empty budget');
-        // Initialize with empty data for new user
         const emptyData = {
           'August': {
-            income: [],
-            expenses: []
+            expected: { income: [], expenses: [] },
+            actual: { income: [], expenses: [] }
           }
         };
         setMonthlyData(emptyData);
@@ -129,9 +154,9 @@ export default function BudgetTracker() {
     return unsubscribe;
   }, [user]);
 
-  // Save to Firestore
+  // Save to Firestore (only when there are manual changes)
   const saveToFirestore = async (data) => {
-    if (!user) return;
+    if (!user || !hasUnsavedChanges) return;
 
     try {
       await setDoc(doc(db, 'budgets', user.uid), {
@@ -140,7 +165,8 @@ export default function BudgetTracker() {
       });
       console.log('Data saved to Firestore successfully');
       setSaveStatus('Saved ✓');
-      setTimeout(() => setSaveStatus(''), 2000);
+      setHasUnsavedChanges(false);
+      setTimeout(() => setSaveStatus(''), 1500);
     } catch (error) {
       console.error('Error saving to Firestore:', error);
       setSaveStatus('Error saving!');
@@ -148,16 +174,17 @@ export default function BudgetTracker() {
     }
   };
 
-  // Auto-save when data changes (with debouncing)
+  // Auto-save when data changes (with debouncing) - only if changes are manual
   useEffect(() => {
-    if (user && monthlyData && Object.keys(monthlyData).length > 0) {
+    if (user && monthlyData && Object.keys(monthlyData).length > 0 && !isFromFirestore.current) {
       const timeoutId = setTimeout(() => {
         saveToFirestore(monthlyData);
-      }, 1000); // Save 1 second after last change
+      }, 2000); // Save 2 seconds after last change
 
       return () => clearTimeout(timeoutId);
     }
-  }, [monthlyData, user]);
+    isFromFirestore.current = false; // Reset flag after processing
+  }, [monthlyData, user, hasUnsavedChanges]);
 
   // Handle login/signup
   const handleLogin = async (e) => {
@@ -193,6 +220,7 @@ export default function BudgetTracker() {
     try {
       await signOut(auth);
       setMonthlyData({});
+      setHasUnsavedChanges(false);
     } catch (error) {
       console.error('Error signing out:', error);
     }
@@ -279,87 +307,104 @@ export default function BudgetTracker() {
   }
 
   // Budget tracker functions
-  const getMonthData = (month) => {
+  const getMonthData = (month, view) => {
     if (!monthlyData[month]) {
       return { income: [], expenses: [] };
     }
-    return monthlyData[month];
+    if (!monthlyData[month].expected) {
+      return monthlyData[month];
+    }
+    return monthlyData[month][view] || { income: [], expenses: [] };
   };
 
-  const updateMonthData = (month, type, data) => {
-    setMonthlyData(prev => ({
-      ...prev,
-      [month]: {
-        ...prev[month],
-        [type]: data
-      }
-    }));
+  const updateMonthData = (month, view, type, data) => {
+    setMonthlyData(prev => {
+      const monthData = prev[month] || { expected: { income: [], expenses: [] }, actual: { income: [], expenses: [] } };
+      return {
+        ...prev,
+        [month]: {
+          ...monthData,
+          [view]: {
+            ...monthData[view],
+            [type]: data
+          }
+        }
+      };
+    });
   };
 
-  const currentData = getMonthData(currentMonth);
+  const currentData = getMonthData(currentMonth, currentView);
   const income = currentData.income || [];
   const expenses = currentData.expenses || [];
 
   const addIncome = () => {
-    // Ensure current month data exists before adding
-    const currentData = monthlyData[currentMonth] || { income: [], expenses: [] };
-    const newIncome = [...(currentData.income || []), { id: Date.now(), name: '', amount: 0 }];
-
-    setMonthlyData(prev => ({
-      ...prev,
-      [currentMonth]: {
-        ...prev[currentMonth],
-        income: newIncome,
-        expenses: currentData.expenses || []
-      }
-    }));
+    const newIncome = [...income, { id: Date.now(), name: '', amount: 0 }];
+    updateMonthData(currentMonth, currentView, 'income', newIncome);
+    setHasUnsavedChanges(true);
   };
 
   const addExpense = () => {
-    // Ensure current month data exists before adding
-    const currentData = monthlyData[currentMonth] || { income: [], expenses: [] };
-    const newExpenses = [...(currentData.expenses || []), { id: Date.now(), name: '', amount: 0 }];
-
-    setMonthlyData(prev => ({
-      ...prev,
-      [currentMonth]: {
-        ...prev[currentMonth],
-        income: currentData.income || [],
-        expenses: newExpenses
-      }
-    }));
+    const newExpenses = [...expenses, { id: Date.now(), name: '', amount: 0 }];
+    updateMonthData(currentMonth, currentView, 'expenses', newExpenses);
+    setHasUnsavedChanges(true);
   };
 
   const updateIncome = (id, field, value) => {
     const updated = income.map(item =>
       item.id === id ? { ...item, [field]: field === 'amount' ? parseFloat(value) || 0 : value } : item
     );
-    updateMonthData(currentMonth, 'income', updated);
+    updateMonthData(currentMonth, currentView, 'income', updated);
+    setHasUnsavedChanges(true);
   };
 
   const updateExpense = (id, field, value) => {
     const updated = expenses.map(item =>
       item.id === id ? { ...item, [field]: field === 'amount' ? parseFloat(value) || 0 : value } : item
     );
-    updateMonthData(currentMonth, 'expenses', updated);
+    updateMonthData(currentMonth, currentView, 'expenses', updated);
+    setHasUnsavedChanges(true);
   };
 
   const deleteIncome = (id) => {
-    updateMonthData(currentMonth, 'income', income.filter(item => item.id !== id));
+    updateMonthData(currentMonth, currentView, 'income', income.filter(item => item.id !== id));
+    setHasUnsavedChanges(true);
   };
 
   const deleteExpense = (id) => {
-    updateMonthData(currentMonth, 'expenses', expenses.filter(item => item.id !== id));
+    updateMonthData(currentMonth, currentView, 'expenses', expenses.filter(item => item.id !== id));
+    setHasUnsavedChanges(true);
   };
 
   const totalIncome = income.reduce((sum, item) => sum + item.amount, 0);
   const totalExpenses = expenses.reduce((sum, item) => sum + item.amount, 0);
   const balance = totalIncome - totalExpenses;
 
-  const getAllMonthsStats = () => {
+  const getComparison = () => {
+    const expectedData = getMonthData(currentMonth, 'expected');
+    const actualData = getMonthData(currentMonth, 'actual');
+
+    const expectedIncome = expectedData.income.reduce((sum, item) => sum + item.amount, 0);
+    const expectedExpenses = expectedData.expenses.reduce((sum, item) => sum + item.amount, 0);
+    const actualIncome = actualData.income.reduce((sum, item) => sum + item.amount, 0);
+    const actualExpenses = actualData.expenses.reduce((sum, item) => sum + item.amount, 0);
+
+    return {
+      expectedIncome,
+      expectedExpenses,
+      expectedBalance: expectedIncome - expectedExpenses,
+      actualIncome,
+      actualExpenses,
+      actualBalance: actualIncome - actualExpenses,
+      incomeDiff: actualIncome - expectedIncome,
+      expensesDiff: actualExpenses - expectedExpenses,
+      balanceDiff: (actualIncome - actualExpenses) - (expectedIncome - expectedExpenses)
+    };
+  };
+
+  const getAllMonthsStats = (view) => {
     const stats = [];
     months.forEach(month => {
-      const data = getMonthData(month);
+      const data = getMonthData(month, view);
       if (data.income.length > 0 || data.expenses.length > 0) {
         const inc = data.income.reduce((sum, item) => sum + item.amount, 0);
         const exp = data.expenses.reduce((sum, item) => sum + item.amount, 0);
@@ -369,30 +414,37 @@ export default function BudgetTracker() {
     return stats;
   };
 
+  const copyFromExpected = () => {
+    const expectedData = getMonthData(currentMonth, 'expected');
+    if (expectedData.income.length > 0 || expectedData.expenses.length > 0) {
+      const copiedIncome = expectedData.income.map(item => ({ ...item, id: Date.now() + Math.random() }));
+      const copiedExpenses = expectedData.expenses.map(item => ({ ...item, id: Date.now() + Math.random() }));
+      updateMonthData(currentMonth, 'actual', 'income', copiedIncome);
+      updateMonthData(currentMonth, 'actual', 'expenses', copiedExpenses);
+      setHasUnsavedChanges(true);
+    }
+  };
+
   const copyPreviousMonth = () => {
     const currentIndex = months.indexOf(currentMonth);
     if (currentIndex > 0) {
       const previousMonth = months[currentIndex - 1];
-      const previousData = getMonthData(previousMonth);
+      const previousData = getMonthData(previousMonth, currentView);
       if (previousData.income.length > 0 || previousData.expenses.length > 0) {
         const copiedIncome = previousData.income.map(item => ({ ...item, id: Date.now() + Math.random() }));
         const copiedExpenses = previousData.expenses.map(item => ({ ...item, id: Date.now() + Math.random() }));
-        setMonthlyData(prev => ({
-          ...prev,
-          [currentMonth]: {
-            income: copiedIncome,
-            expenses: copiedExpenses
-          }
-        }));
+        updateMonthData(currentMonth, currentView, 'income', copiedIncome);
+        updateMonthData(currentMonth, currentView, 'expenses', copiedExpenses);
+        setHasUnsavedChanges(true);
       }
     }
   };
 
   const getMonthStatus = (month) => {
-    const data = getMonthData(month);
-    if (!data.income.length && !data.expenses.length) return null;
-    const inc = data.income.reduce((sum, item) => sum + item.amount, 0);
-    const exp = data.expenses.reduce((sum, item) => sum + item.amount, 0);
+    const actualData = getMonthData(month, 'actual');
+    if (!actualData.income.length && !actualData.expenses.length) return null;
+    const inc = actualData.income.reduce((sum, item) => sum + item.amount, 0);
+    const exp = actualData.expenses.reduce((sum, item) => sum + item.amount, 0);
     return inc - exp;
   };
 
@@ -404,12 +456,23 @@ export default function BudgetTracker() {
   };
 
   const getTrendData = () => {
-    return getAllMonthsStats().map(stat => ({
-      month: stat.month.slice(0, 3),
-      Income: stat.income,
-      Expenses: stat.expenses,
-      Balance: stat.balance
-    }));
+    const expectedStats = getAllMonthsStats('expected');
+    const actualStats = getAllMonthsStats('actual');
+
+    const allMonths = [...new Set([...expectedStats.map(s => s.month), ...actualStats.map(s => s.month)])];
+
+    return allMonths.map(month => {
+      const expected = expectedStats.find(s => s.month === month);
+      const actual = actualStats.find(s => s.month === month);
+
+      return {
+        month: month.slice(0, 3),
+        'Expected Income': expected?.income || 0,
+        'Expected Expenses': expected?.expenses || 0,
+        'Actual Income': actual?.income || 0,
+        'Actual Expenses': actual?.expenses || 0
+      };
+    });
   };
 
   const getTopExpenses = () => {
@@ -422,13 +485,15 @@ export default function BudgetTracker() {
 
   const COLORS = ['#10b981', '#3b82f6', '#f59e0b', '#ef4444', '#8b5cf6', '#ec4899', '#14b8a6', '#f97316'];
 
-  const avgMonthlyIncome = getAllMonthsStats().length > 0
-    ? getAllMonthsStats().reduce((sum, s) => sum + s.income, 0) / getAllMonthsStats().length
+  const avgMonthlyIncome = getAllMonthsStats(currentView).length > 0
+    ? getAllMonthsStats(currentView).reduce((sum, s) => sum + s.income, 0) / getAllMonthsStats(currentView).length
     : 0;
 
-  const avgMonthlyExpenses = getAllMonthsStats().length > 0
-    ? getAllMonthsStats().reduce((sum, s) => sum + s.expenses, 0) / getAllMonthsStats().length
+  const avgMonthlyExpenses = getAllMonthsStats(currentView).length > 0
+    ? getAllMonthsStats(currentView).reduce((sum, s) => sum + s.expenses, 0) / getAllMonthsStats(currentView).length
     : 0;
+
+  const comparison = getComparison();
 
   return (
     <div className="min-h-screen bg-gradient-to-br from-slate-900 via-slate-800 to-slate-900 p-4 md:p-6">
@@ -472,8 +537,8 @@ export default function BudgetTracker() {
                   key={month}
                   onClick={() => setCurrentMonth(month)}
                   className={`px-3 py-2 rounded-lg font-medium transition relative ${currentMonth === month
-                    ? 'bg-blue-600 text-white shadow-lg'
-                    : 'bg-slate-700 text-slate-300 hover:bg-slate-600'
+                      ? 'bg-blue-600 text-white shadow-lg'
+                      : 'bg-slate-700 text-slate-300 hover:bg-slate-600'
                     }`}
                 >
                   {month.slice(0, 3)}
@@ -485,14 +550,52 @@ export default function BudgetTracker() {
               );
             })}
           </div>
-          {months.indexOf(currentMonth) > 0 && (
+        </div>
+
+        {/* Expected vs Actual Tabs */}
+        <div className="bg-slate-800 rounded-xl shadow-2xl p-4 mb-6 border border-slate-700">
+          <div className="flex gap-4">
             <button
-              onClick={copyPreviousMonth}
-              className="mt-3 text-sm bg-slate-700 hover:bg-slate-600 text-slate-300 px-4 py-2 rounded-lg transition"
+              onClick={() => setCurrentView('expected')}
+              className={`flex items-center gap-2 px-6 py-3 rounded-lg font-medium transition ${currentView === 'expected'
+                  ? 'bg-amber-600 text-white shadow-lg'
+                  : 'bg-slate-700 text-slate-300 hover:bg-slate-600'
+                }`}
             >
-              Copy from {months[months.indexOf(currentMonth) - 1]}
+              <Target size={20} />
+              Expected Budget
             </button>
-          )}
+            <button
+              onClick={() => setCurrentView('actual')}
+              className={`flex items-center gap-2 px-6 py-3 rounded-lg font-medium transition ${currentView === 'actual'
+                  ? 'bg-emerald-600 text-white shadow-lg'
+                  : 'bg-slate-700 text-slate-300 hover:bg-slate-600'
+                }`}
+            >
+              <CheckCircle size={20} />
+              Actual Spending
+            </button>
+          </div>
+
+          {/* Quick actions */}
+          <div className="mt-3 flex gap-2">
+            {months.indexOf(currentMonth) > 0 && (
+              <button
+                onClick={copyPreviousMonth}
+                className="text-sm bg-slate-700 hover:bg-slate-600 text-slate-300 px-4 py-2 rounded-lg transition"
+              >
+                Copy from {months[months.indexOf(currentMonth) - 1]}
+              </button>
+            )}
+            {currentView === 'actual' && (
+              <button
+                onClick={copyFromExpected}
+                className="text-sm bg-slate-700 hover:bg-slate-600 text-slate-300 px-4 py-2 rounded-lg transition"
+              >
+                Copy from Expected
+              </button>
+            )}
+          </div>
         </div>
 
         <div className="grid lg:grid-cols-2 gap-6 mb-6">
@@ -607,7 +710,7 @@ export default function BudgetTracker() {
         <div className="bg-slate-800 rounded-xl shadow-2xl p-8 mb-6 border border-slate-700">
           <div className="flex items-center justify-center gap-3 mb-6">
             <DollarSign size={32} className="text-blue-400" />
-            <h2 className="text-3xl font-bold text-white">{currentMonth} Summary</h2>
+            <h2 className="text-3xl font-bold text-white">{currentMonth} Summary - {currentView === 'expected' ? 'Expected' : 'Actual'}</h2>
           </div>
 
           <div className="grid md:grid-cols-3 gap-6">
@@ -654,9 +757,81 @@ export default function BudgetTracker() {
           </div>
         </div>
 
+        {/* Expected vs Actual Comparison */}
+        {comparison.expectedIncome > 0 || comparison.actualIncome > 0 ? (
+          <div className="bg-slate-800 rounded-xl shadow-2xl p-8 mb-6 border border-slate-700">
+            <h2 className="text-2xl font-bold text-white mb-6 text-center">Expected vs Actual Comparison</h2>
+
+            <div className="grid md:grid-cols-3 gap-6">
+              <div className="bg-slate-700 rounded-lg p-6">
+                <p className="text-slate-400 text-center mb-2">Income</p>
+                <div className="flex justify-between items-center mb-1">
+                  <span className="text-sm text-slate-400">Expected:</span>
+                  <span className="text-amber-400 font-bold">£{comparison.expectedIncome.toFixed(2)}</span>
+                </div>
+                <div className="flex justify-between items-center mb-2">
+                  <span className="text-sm text-slate-400">Actual:</span>
+                  <span className="text-emerald-400 font-bold">£{comparison.actualIncome.toFixed(2)}</span>
+                </div>
+                <div className="pt-2 border-t border-slate-600">
+                  <div className="flex justify-between items-center">
+                    <span className="text-sm text-slate-400">Difference:</span>
+                    <span className={`font-bold ${comparison.incomeDiff >= 0 ? 'text-emerald-400' : 'text-rose-400'}`}>
+                      {comparison.incomeDiff >= 0 ? '+' : ''}£{comparison.incomeDiff.toFixed(2)}
+                    </span>
+                  </div>
+                </div>
+              </div>
+
+              <div className="bg-slate-700 rounded-lg p-6">
+                <p className="text-slate-400 text-center mb-2">Expenses</p>
+                <div className="flex justify-between items-center mb-1">
+                  <span className="text-sm text-slate-400">Expected:</span>
+                  <span className="text-amber-400 font-bold">£{comparison.expectedExpenses.toFixed(2)}</span>
+                </div>
+                <div className="flex justify-between items-center mb-2">
+                  <span className="text-sm text-slate-400">Actual:</span>
+                  <span className="text-rose-400 font-bold">£{comparison.actualExpenses.toFixed(2)}</span>
+                </div>
+                <div className="pt-2 border-t border-slate-600">
+                  <div className="flex justify-between items-center">
+                    <span className="text-sm text-slate-400">Difference:</span>
+                    <span className={`font-bold ${comparison.expensesDiff <= 0 ? 'text-emerald-400' : 'text-rose-400'}`}>
+                      {comparison.expensesDiff >= 0 ? '+' : ''}£{comparison.expensesDiff.toFixed(2)}
+                    </span>
+                  </div>
+                </div>
+              </div>
+
+              <div className="bg-slate-700 rounded-lg p-6">
+                <p className="text-slate-400 text-center mb-2">Balance</p>
+                <div className="flex justify-between items-center mb-1">
+                  <span className="text-sm text-slate-400">Expected:</span>
+                  <span className={`font-bold ${comparison.expectedBalance >= 0 ? 'text-amber-400' : 'text-rose-400'}`}>
+                    £{comparison.expectedBalance.toFixed(2)}
+                  </span>
+                </div>
+                <div className="flex justify-between items-center mb-2">
+                  <span className="text-sm text-slate-400">Actual:</span>
+                  <span className={`font-bold ${comparison.actualBalance >= 0 ? 'text-emerald-400' : 'text-rose-400'}`}>
+                    £{comparison.actualBalance.toFixed(2)}
+                  </span>
+                </div>
+                <div className="pt-2 border-t border-slate-600">
+                  <div className="flex justify-between items-center">
+                    <span className="text-sm text-slate-400">Difference:</span>
+                    <span className={`font-bold ${comparison.balanceDiff >= 0 ? 'text-emerald-400' : 'text-rose-400'}`}>
+                      {comparison.balanceDiff >= 0 ? '+' : ''}£{comparison.balanceDiff.toFixed(2)}
+                    </span>
+                  </div>
+                </div>
+              </div>
+            </div>
+          </div>
+        ) : null}
+
         {/* Analytics Section */}
         <div className="grid lg:grid-cols-2 gap-6 mb-6">
-          {/* Expense Breakdown Pie Chart */}
           {getExpenseBreakdown().length > 0 && (
             <div className="bg-slate-800 rounded-xl shadow-2xl p-6 border border-slate-700">
               <div className="flex items-center gap-2 mb-4">
@@ -685,7 +860,6 @@ export default function BudgetTracker() {
             </div>
           )}
 
-          {/* Top Expenses Bar Chart */}
           {getTopExpenses().length > 0 && (
             <div className="bg-slate-800 rounded-xl shadow-2xl p-6 border border-slate-700">
               <div className="flex items-center gap-2 mb-4">
@@ -708,12 +882,11 @@ export default function BudgetTracker() {
           )}
         </div>
 
-        {/* Income vs Expenses Trend */}
         {getTrendData().length > 1 && (
           <div className="bg-slate-800 rounded-xl shadow-2xl p-6 mb-6 border border-slate-700">
             <div className="flex items-center gap-2 mb-4">
               <TrendingUp size={24} className="text-emerald-400" />
-              <h2 className="text-2xl font-bold text-white">Income vs Expenses Trend</h2>
+              <h2 className="text-2xl font-bold text-white">Expected vs Actual Trend</h2>
             </div>
             <ResponsiveContainer width="100%" height={300}>
               <LineChart data={getTrendData()}>
@@ -725,18 +898,18 @@ export default function BudgetTracker() {
                   contentStyle={{ backgroundColor: '#1e293b', border: '1px solid #334155' }}
                 />
                 <Legend />
-                <Line type="monotone" dataKey="Income" stroke="#10b981" strokeWidth={2} />
-                <Line type="monotone" dataKey="Expenses" stroke="#f43f5e" strokeWidth={2} />
-                <Line type="monotone" dataKey="Balance" stroke="#3b82f6" strokeWidth={2} />
+                <Line type="monotone" dataKey="Expected Income" stroke="#f59e0b" strokeWidth={2} strokeDasharray="5 5" />
+                <Line type="monotone" dataKey="Actual Income" stroke="#10b981" strokeWidth={2} />
+                <Line type="monotone" dataKey="Expected Expenses" stroke="#fca5a5" strokeWidth={2} strokeDasharray="5 5" />
+                <Line type="monotone" dataKey="Actual Expenses" stroke="#f43f5e" strokeWidth={2} />
               </LineChart>
             </ResponsiveContainer>
           </div>
         )}
 
-        {/* Year Overview Table */}
-        {getAllMonthsStats().length > 1 && (
+        {getAllMonthsStats(currentView).length > 1 && (
           <div className="bg-slate-800 rounded-xl shadow-2xl p-6 border border-slate-700">
-            <h2 className="text-2xl font-bold text-white mb-4">Year Overview</h2>
+            <h2 className="text-2xl font-bold text-white mb-4">Year Overview - {currentView === 'expected' ? 'Expected' : 'Actual'}</h2>
             <div className="overflow-x-auto">
               <table className="w-full text-left">
                 <thead>
@@ -749,11 +922,11 @@ export default function BudgetTracker() {
                   </tr>
                 </thead>
                 <tbody>
-                  {getAllMonthsStats().map(stat => (
+                  {getAllMonthsStats(currentView).map(stat => (
                     <tr key={stat.month} className="border-b border-slate-700/50">
                       <td className="py-3 text-white font-medium">{stat.month}</td>
-                      <td className="py-3 text-emerald-400 text-right">${stat.income.toFixed(2)}</td>
-                      <td className="py-3 text-rose-400 text-right">${stat.expenses.toFixed(2)}</td>
+                      <td className="py-3 text-emerald-400 text-right">£{stat.income.toFixed(2)}</td>
+                      <td className="py-3 text-rose-400 text-right">£{stat.expenses.toFixed(2)}</td>
                       <td className={`py-3 text-right font-bold ${stat.balance >= 0 ? 'text-emerald-400' : 'text-red-400'}`}>
                         £{stat.balance.toFixed(2)}
                       </td>

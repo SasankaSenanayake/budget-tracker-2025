@@ -84,6 +84,7 @@ const CheckCircle = ({ size = 24, className = "" }) => (
 
 export default function BudgetTracker() {
   const months = ['January', 'February', 'March', 'April', 'May', 'June', 'July', 'August', 'September', 'October', 'November', 'December'];
+  const years = [2025, 2026];
 
   // Authentication state
   const [user, setUser] = useState(null);
@@ -95,9 +96,10 @@ export default function BudgetTracker() {
   const [saveStatus, setSaveStatus] = useState('');
 
   // Budget data state
+  const [currentYear, setCurrentYear] = useState(2025);
   const [currentMonth, setCurrentMonth] = useState('August');
   const [currentView, setCurrentView] = useState('actual');
-  const [monthlyData, setMonthlyData] = useState({});
+  const [yearlyData, setYearlyData] = useState({});
 
   // Track manual changes and prevent save loop
   const [hasUnsavedChanges, setHasUnsavedChanges] = useState(false);
@@ -125,26 +127,37 @@ export default function BudgetTracker() {
 
       if (docSnap.exists()) {
         console.log('Data loaded from Firestore');
-        const loadedData = docSnap.data().monthlyData || {};
-        // Ensure data structure has expected and actual
-        Object.keys(loadedData).forEach(month => {
-          if (!loadedData[month].expected) {
-            loadedData[month] = {
-              expected: { income: [], expenses: [] },
-              actual: loadedData[month]
-            };
-          }
+        const loadedData = docSnap.data().yearlyData || {};
+
+        // Migrate old monthlyData structure to yearlyData if needed
+        if (!loadedData[2025] && docSnap.data().monthlyData) {
+          const oldMonthlyData = docSnap.data().monthlyData;
+          loadedData[2025] = oldMonthlyData;
+        }
+
+        // Ensure data structure has expected and actual for each year and month
+        Object.keys(loadedData).forEach(year => {
+          Object.keys(loadedData[year]).forEach(month => {
+            if (!loadedData[year][month].expected) {
+              loadedData[year][month] = {
+                expected: { income: [], expenses: [] },
+                actual: loadedData[year][month]
+              };
+            }
+          });
         });
-        setMonthlyData(loadedData);
+        setYearlyData(loadedData);
       } else {
         console.log('No existing data found, initializing empty budget');
         const emptyData = {
-          'August': {
-            expected: { income: [], expenses: [] },
-            actual: { income: [], expenses: [] }
+          2025: {
+            'August': {
+              expected: { income: [], expenses: [] },
+              actual: { income: [], expenses: [] }
+            }
           }
         };
-        setMonthlyData(emptyData);
+        setYearlyData(emptyData);
       }
     }, (error) => {
       console.error('Error loading data from Firestore:', error);
@@ -160,7 +173,7 @@ export default function BudgetTracker() {
 
     try {
       await setDoc(doc(db, 'budgets', user.uid), {
-        monthlyData: data,
+        yearlyData: data,
         lastUpdated: new Date().toISOString()
       });
       console.log('Data saved to Firestore successfully');
@@ -176,15 +189,15 @@ export default function BudgetTracker() {
 
   // Auto-save when data changes (with debouncing) - only if changes are manual
   useEffect(() => {
-    if (user && monthlyData && Object.keys(monthlyData).length > 0 && !isFromFirestore.current) {
+    if (user && yearlyData && Object.keys(yearlyData).length > 0 && !isFromFirestore.current) {
       const timeoutId = setTimeout(() => {
-        saveToFirestore(monthlyData);
+        saveToFirestore(yearlyData);
       }, 2000); // Save 2 seconds after last change
 
       return () => clearTimeout(timeoutId);
     }
     isFromFirestore.current = false; // Reset flag after processing
-  }, [monthlyData, user, hasUnsavedChanges]);
+  }, [yearlyData, user, hasUnsavedChanges]);
 
   // Handle login/signup
   const handleLogin = async (e) => {
@@ -219,7 +232,7 @@ export default function BudgetTracker() {
   const handleLogout = async () => {
     try {
       await signOut(auth);
-      setMonthlyData({});
+      setYearlyData({});
       setHasUnsavedChanges(false);
     } catch (error) {
       console.error('Error signing out:', error);
@@ -307,45 +320,49 @@ export default function BudgetTracker() {
   }
 
   // Budget tracker functions
-  const getMonthData = (month, view) => {
-    if (!monthlyData[month]) {
+  const getMonthData = (year, month, view) => {
+    if (!yearlyData[year] || !yearlyData[year][month]) {
       return { income: [], expenses: [] };
     }
-    if (!monthlyData[month].expected) {
-      return monthlyData[month];
+    if (!yearlyData[year][month].expected) {
+      return yearlyData[year][month];
     }
-    return monthlyData[month][view] || { income: [], expenses: [] };
+    return yearlyData[year][month][view] || { income: [], expenses: [] };
   };
 
-  const updateMonthData = (month, view, type, data) => {
-    setMonthlyData(prev => {
-      const monthData = prev[month] || { expected: { income: [], expenses: [] }, actual: { income: [], expenses: [] } };
+  const updateMonthData = (year, month, view, type, data) => {
+    setYearlyData(prev => {
+      const yearData = prev[year] || {};
+      const monthData = yearData[month] || { expected: { income: [], expenses: [] }, actual: { income: [], expenses: [] } };
       return {
         ...prev,
-        [month]: {
-          ...monthData,
-          [view]: {
-            ...monthData[view],
-            [type]: data
+        [year]: {
+          ...yearData,
+          [month]: {
+            ...monthData,
+            [view]: {
+              ...monthData[view],
+              [type]: data
+            }
           }
         }
       };
     });
   };
 
-  const currentData = getMonthData(currentMonth, currentView);
+  const currentData = getMonthData(currentYear, currentMonth, currentView);
   const income = currentData.income || [];
   const expenses = currentData.expenses || [];
 
   const addIncome = () => {
     const newIncome = [...income, { id: Date.now(), name: '', amount: 0 }];
-    updateMonthData(currentMonth, currentView, 'income', newIncome);
+    updateMonthData(currentYear, currentMonth, currentView, 'income', newIncome);
     setHasUnsavedChanges(true);
   };
 
   const addExpense = () => {
     const newExpenses = [...expenses, { id: Date.now(), name: '', amount: 0 }];
-    updateMonthData(currentMonth, currentView, 'expenses', newExpenses);
+    updateMonthData(currentYear, currentMonth, currentView, 'expenses', newExpenses);
     setHasUnsavedChanges(true);
   };
 
@@ -353,7 +370,7 @@ export default function BudgetTracker() {
     const updated = income.map(item =>
       item.id === id ? { ...item, [field]: field === 'amount' ? parseFloat(value) || 0 : value } : item
     );
-    updateMonthData(currentMonth, currentView, 'income', updated);
+    updateMonthData(currentYear, currentMonth, currentView, 'income', updated);
     setHasUnsavedChanges(true);
   };
 
@@ -361,17 +378,17 @@ export default function BudgetTracker() {
     const updated = expenses.map(item =>
       item.id === id ? { ...item, [field]: field === 'amount' ? parseFloat(value) || 0 : value } : item
     );
-    updateMonthData(currentMonth, currentView, 'expenses', updated);
+    updateMonthData(currentYear, currentMonth, currentView, 'expenses', updated);
     setHasUnsavedChanges(true);
   };
 
   const deleteIncome = (id) => {
-    updateMonthData(currentMonth, currentView, 'income', income.filter(item => item.id !== id));
+    updateMonthData(currentYear, currentMonth, currentView, 'income', income.filter(item => item.id !== id));
     setHasUnsavedChanges(true);
   };
 
   const deleteExpense = (id) => {
-    updateMonthData(currentMonth, currentView, 'expenses', expenses.filter(item => item.id !== id));
+    updateMonthData(currentYear, currentMonth, currentView, 'expenses', expenses.filter(item => item.id !== id));
     setHasUnsavedChanges(true);
   };
 
@@ -380,8 +397,8 @@ export default function BudgetTracker() {
   const balance = totalIncome - totalExpenses;
 
   const getComparison = () => {
-    const expectedData = getMonthData(currentMonth, 'expected');
-    const actualData = getMonthData(currentMonth, 'actual');
+    const expectedData = getMonthData(currentYear, currentMonth, 'expected');
+    const actualData = getMonthData(currentYear, currentMonth, 'actual');
 
     const expectedIncome = expectedData.income.reduce((sum, item) => sum + item.amount, 0);
     const expectedExpenses = expectedData.expenses.reduce((sum, item) => sum + item.amount, 0);
@@ -404,7 +421,7 @@ export default function BudgetTracker() {
   const getAllMonthsStats = (view) => {
     const stats = [];
     months.forEach(month => {
-      const data = getMonthData(month, view);
+      const data = getMonthData(currentYear, month, view);
       if (data.income.length > 0 || data.expenses.length > 0) {
         const inc = data.income.reduce((sum, item) => sum + item.amount, 0);
         const exp = data.expenses.reduce((sum, item) => sum + item.amount, 0);
@@ -415,12 +432,12 @@ export default function BudgetTracker() {
   };
 
   const copyFromExpected = () => {
-    const expectedData = getMonthData(currentMonth, 'expected');
+    const expectedData = getMonthData(currentYear, currentMonth, 'expected');
     if (expectedData.income.length > 0 || expectedData.expenses.length > 0) {
       const copiedIncome = expectedData.income.map(item => ({ ...item, id: Date.now() + Math.random() }));
       const copiedExpenses = expectedData.expenses.map(item => ({ ...item, id: Date.now() + Math.random() }));
-      updateMonthData(currentMonth, 'actual', 'income', copiedIncome);
-      updateMonthData(currentMonth, 'actual', 'expenses', copiedExpenses);
+      updateMonthData(currentYear, currentMonth, 'actual', 'income', copiedIncome);
+      updateMonthData(currentYear, currentMonth, 'actual', 'expenses', copiedExpenses);
       setHasUnsavedChanges(true);
     }
   };
@@ -429,19 +446,19 @@ export default function BudgetTracker() {
     const currentIndex = months.indexOf(currentMonth);
     if (currentIndex > 0) {
       const previousMonth = months[currentIndex - 1];
-      const previousData = getMonthData(previousMonth, currentView);
+      const previousData = getMonthData(currentYear, previousMonth, currentView);
       if (previousData.income.length > 0 || previousData.expenses.length > 0) {
         const copiedIncome = previousData.income.map(item => ({ ...item, id: Date.now() + Math.random() }));
         const copiedExpenses = previousData.expenses.map(item => ({ ...item, id: Date.now() + Math.random() }));
-        updateMonthData(currentMonth, currentView, 'income', copiedIncome);
-        updateMonthData(currentMonth, currentView, 'expenses', copiedExpenses);
+        updateMonthData(currentYear, currentMonth, currentView, 'income', copiedIncome);
+        updateMonthData(currentYear, currentMonth, currentView, 'expenses', copiedExpenses);
         setHasUnsavedChanges(true);
       }
     }
   };
 
   const getMonthStatus = (month) => {
-    const actualData = getMonthData(month, 'actual');
+    const actualData = getMonthData(currentYear, month, 'actual');
     if (!actualData.income.length && !actualData.expenses.length) return null;
     const inc = actualData.income.reduce((sum, item) => sum + item.amount, 0);
     const exp = actualData.expenses.reduce((sum, item) => sum + item.amount, 0);
@@ -520,6 +537,28 @@ export default function BudgetTracker() {
                 Logout
               </button>
             </div>
+          </div>
+        </div>
+
+        {/* Year Selector */}
+        <div className="bg-slate-800 rounded-xl shadow-2xl p-4 mb-6 border border-slate-700">
+          <div className="flex items-center gap-2 mb-3">
+            <Calendar size={20} className="text-purple-400" />
+            <h3 className="text-lg font-semibold text-white">Select Year</h3>
+          </div>
+          <div className="flex gap-3">
+            {years.map(year => (
+              <button
+                key={year}
+                onClick={() => setCurrentYear(year)}
+                className={`px-8 py-3 rounded-lg font-bold text-lg transition ${currentYear === year
+                    ? 'bg-purple-600 text-white shadow-lg'
+                    : 'bg-slate-700 text-slate-300 hover:bg-slate-600'
+                  }`}
+              >
+                {year}
+              </button>
+            ))}
           </div>
         </div>
 
@@ -710,7 +749,7 @@ export default function BudgetTracker() {
         <div className="bg-slate-800 rounded-xl shadow-2xl p-8 mb-6 border border-slate-700">
           <div className="flex items-center justify-center gap-3 mb-6">
             <DollarSign size={32} className="text-blue-400" />
-            <h2 className="text-3xl font-bold text-white">{currentMonth} Summary - {currentView === 'expected' ? 'Expected' : 'Actual'}</h2>
+            <h2 className="text-3xl font-bold text-white">{currentMonth} {currentYear} Summary - {currentView === 'expected' ? 'Expected' : 'Actual'}</h2>
           </div>
 
           <div className="grid md:grid-cols-3 gap-6">
